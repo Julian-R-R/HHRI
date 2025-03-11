@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/julianruizrodriguez/Documents/EPFL/Master/MA2/Haptic_human_robot_interfaces/hhri-software-v2/Firmware/src",
+      "program": "/Users/julianruizrodriguez/Documents/EPFL/Master/MA2/Haptic_human_robot_interfaces/hhri-software-v2/Firmware/src/build/Debug/outDebug"
+    }
+  ]
+}
