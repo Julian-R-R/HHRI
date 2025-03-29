@@ -53,11 +53,23 @@ volatile float32_t prev2_est_speed_hall = 0.0f;
 
 volatile float32_t cutoff_freq; //cutoff frequency for the low pass filter
 
+volatile float32_t k_p = 0.0f;
+volatile float32_t k_d = 0.0f;
+volatile float32_t k_i = 0.0f;
+volatile float32_t ref_pos = 0.0f;
+
+volatile float32_t error = 0.0f;
+volatile float32_t integral = 0.0f;
+volatile float32_t derivative = 0.0f;
+volatile float32_t prev_error = 0.0f;
+
+volatile float32_t set_PID = 0.0f;
+
 void hapt_Update(void);
 
 /**
-  * @brief Initializes the haptic controller.
-  */
+ * @brief Initializes the haptic controller.
+ */
 void hapt_Init(void)
 {
     hapt_timestamp = 0;
@@ -72,12 +84,17 @@ void hapt_Init(void)
     filtered_acc_hall = 0.0f;
     cutoff_freq = 50.0f;
 
+    // initialize PID controller
+    k_p = 0.02f;
+    k_i = 0.05;
+    k_d = 0.0025f;
+
     // Make the timers call the update function periodically.
     cbt_SetHapticControllerTimer(hapt_Update, DEFAULT_HAPTIC_CONTROLLER_PERIOD);
 
     // Share some variables with the computer.
     comm_monitorUint32Func("timestep [us]", cbt_GetHapticControllerPeriod,
-                           cbt_SetHapticControllerPeriod);
+                          cbt_SetHapticControllerPeriod);
     comm_monitorFloat("motor_torque [N.m]", (float32_t*)&hapt_motorTorque, READWRITE);
     comm_monitorFloat("encoder_paddle_pos [deg]", (float32_t*)&hapt_encoderPaddleAngle, READONLY);
     comm_monitorFloat("speed estimate [deg/s]", (float32_t*)&est_speed, READONLY);
@@ -92,11 +109,22 @@ void hapt_Init(void)
     comm_monitorFloat("stiffness [N.m/deg]", (float32_t*)&stiffness, WRITEONLY);
     comm_monitorFloat("damping [N.m/deg]", (float32_t*)&damping, WRITEONLY);
     comm_monitorFloat("rest position [deg]", (float32_t*)&rest_angle, WRITEONLY);
+    comm_monitorFloat("ref_pos [deg]", (float32_t*)&ref_pos, READWRITE);
+
+    comm_monitorFloat("k_p", (float32_t*)&k_p, WRITEONLY);
+    comm_monitorFloat("k_d", (float32_t*)&k_d, WRITEONLY);
+    comm_monitorFloat("k_i", (float32_t*)&k_i, WRITEONLY);
+
+    comm_monitorFloat("set PID 0/1", (float32_t*)&set_PID, WRITEONLY);
+
+    comm_monitorFloat("error", (float32_t*)&error, READONLY);
+    comm_monitorFloat("integral", (float32_t*)&integral, READONLY);
+    comm_monitorFloat("derivative", (float32_t*)&derivative, READONLY);
 }
 
 /**
-  * @brief Updates the haptic controller state.
-  */
+ * @brief Updates the haptic controller state.
+ */
 void hapt_Update()
 {
     float32_t motorShaftAngle; // [deg].
@@ -123,38 +151,70 @@ void hapt_Update()
     // Compute the motor torque, and apply it.
     //hapt_motorTorque = 0.0f;
     if (stiffness != 0) {
-    	hapt_motorTorque = - stiffness * (hapt_encoderPaddleAngle - rest_angle) * 0.01;
+      hapt_motorTorque = - stiffness * (hapt_encoderPaddleAngle - rest_angle) * 0.01;
     }
 
     //speed estimation from optical sensor and Hall sensor
     if(TWO_DIV_INTEGRATION) {
-    	est_speed = (prev2_angle - hapt_encoderPaddleAngle) / (2*dt);
-    	est_speed_hall = (prev2_angle_hall - est_angle_from_hall) / (2*dt);
+      est_speed = (prev2_angle - hapt_encoderPaddleAngle) / (2*dt);
+      est_speed_hall = (prev2_angle_hall - est_angle_from_hall) / (2*dt);
       // filtered_speed_hall = low_Pass_Filter(est_speed_hall, filtered_speed_hall, 2*dt, 10);
     } else {
-    	est_speed = (prev_angle - hapt_encoderPaddleAngle) / dt;
-    	est_speed_hall = (prev_angle_hall - est_angle_from_hall) / dt;
+      est_speed = (prev_angle - hapt_encoderPaddleAngle) / dt;
+      est_speed_hall = (prev_angle_hall - est_angle_from_hall) / dt;
     }
 
     filtered_speed_hall = low_Pass_Filter(est_speed_hall, filtered_speed_hall, dt, cutoff_freq);
 
     //acceleration estimation from optical sensor and Hall sensor
     if(TWO_DIV_INTEGRATION) {
-    	est_acc = (prev2_est_speed - est_speed) / (2*dt);
-    	est_acc_hall = (prev2_est_speed_hall - est_speed_hall) / (2*dt);
+      est_acc = (prev2_est_speed - est_speed) / (2*dt);
+      est_acc_hall = (prev2_est_speed_hall - est_speed_hall) / (2*dt);
       // filtered_acc_hall = low_Pass_Filter(est_acc_hall, filtered_acc_hall, 2*dt, 10);
     } else {
-    	est_acc = (prev_est_speed - est_speed) / dt;
-    	est_acc_hall = (prev_est_speed_hall - est_speed_hall) / dt;
+      est_acc = (prev_est_speed - est_speed) / dt;
+      est_acc_hall = (prev_est_speed_hall - est_speed_hall) / dt;
     }
 
     filtered_acc_hall = low_Pass_Filter(est_acc_hall, filtered_acc_hall, dt, cutoff_freq);
 
     if (damping != 0){
-		if (hapt_encoderPaddleAngle - rest_angle <= 10 && hapt_encoderPaddleAngle - rest_angle >= -10){
-			hapt_motorTorque = hapt_motorTorque + damping * est_speed * 0.01;
-		}
+      if (hapt_encoderPaddleAngle - rest_angle <= 10 && hapt_encoderPaddleAngle - rest_angle >= -10){
+        hapt_motorTorque = hapt_motorTorque + damping * est_speed * 0.01;
+      }
     }
+    
+    float_t32_t filtered_enc_pos = low_Pass_Filter(hapt_encoderPaddleAngle, hapt_encoderPaddleAngle, dt, cutoff_freq);
+    float_t32_t filtered_hall_pos = low_Pass_Filter(est_angle_from_hall, est_angle_from_hall, dt, cutoff_freq);
+
+    // PID controller
+    if(set_PID == 1){
+    	// hall encoder
+    	// error = ref_pos - est_angle_from_hall;
+      // error = ref_pos - filtered_hall_pos;
+    	// incremental encoder
+    	//error = ref_pos - hapt_encoderPaddleAngle;
+      error = ref_pos - filtered_enc_pos;
+    	integral = integral + error * dt;
+    	derivative = (error - prev_error) / dt;
+
+      
+
+      if (error >= -0.2 && error <= 0.2){
+        hapt_motorTorque = 0;
+      } else {
+        hapt_motorTorque = k_p * error + k_i * integral + k_d * derivative;
+
+        if (hapt_motorTorque > 0.02){
+          hapt_motorTorque = 0.02;
+        } else if (hapt_motorTorque < -0.02){
+          hapt_motorTorque = -0.02;
+          }
+      }
+
+      prev_error = error;
+    }
+    
 
     torq_SetTorque(hapt_motorTorque);
     hapt_hallVoltage = hall_GetVoltage();
@@ -180,4 +240,3 @@ float32_t low_Pass_Filter(float32_t input, float32_t prev_output, float32_t T, f
   float32_t alpha = T / (T + 1 / (2 * M_PI * cutoff_freq));
   return alpha * input + (1 - alpha) * prev_output;
 }
-
