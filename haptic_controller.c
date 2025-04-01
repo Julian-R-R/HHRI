@@ -1,18 +1,18 @@
 /*
- * Copyright (C) 2021 EPFL-REHAssist (Rehabilitation and Assistive Robotics Group).
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+* Copyright (C) 2021 EPFL-REHAssist (Rehabilitation and Assistive Robotics Group).
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*      http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 
 #include "haptic_controller.h"
 #include "communication.h"
@@ -72,11 +72,24 @@ float32_t friction_torque = 0.0f; // [N.m].
 float32_t step = 0.0001f; // [-].
 float32_t counter = 0.0f; // [-].
 
+// Friction and gravity compensation variables
+volatile uint32_t dry_friction_comp = 0; // Toggle for dry friction (0: off, 1: on)
+volatile uint32_t viscous_friction_comp = 0; // Toggle for viscous friction (0: off, 1: on)
+volatile uint32_t gravity_comp = 0; // Toggle for gravity compensation (0: off, 1: on)
+volatile float32_t center_of_mass_dist = 0.0251f; // [m].
+volatile float32_t paddle_mass = 0.077f; // [kg].
+volatile float32_t dry_coeff = 0.0f; // [N.m.s/deg].
+volatile float32_t dry_comp = 0.0f; // [N.m].
+volatile float32_t visc_comp = 0.0f; // [N.m].
+volatile float32_t grav_comp = 0.0f; // [N.m].
+volatile float32_t sin_angle = 0.0f; // [-].
+
+
 void hapt_Update(void);
 
 /**
- * @brief Initializes the haptic controller.
- */
+* @brief Initializes the haptic controller.
+*/
 void hapt_Init(void)
 {
     hapt_timestamp = 0;
@@ -91,6 +104,9 @@ void hapt_Init(void)
     filtered_acc_hall = 0.0f;
     cutoff_freq = 100.0f;
 
+    dry_friction_comp = 0;
+    viscous_friction_comp = 0;
+    gravity_comp = 0;
 
     // initialize PID controller
     k_p = 0.02f;
@@ -126,16 +142,23 @@ void hapt_Init(void)
     comm_monitorFloat("set PID 0/1", (float32_t*)&set_PID, WRITEONLY);
     comm_monitorFloat("start dry test 0/1", (float32_t*)&start_dry_test, WRITEONLY);
 
-    comm_monitorFloat("error", (float32_t*)&error, READONLY);
-    comm_monitorFloat("integral", (float32_t*)&integral, READONLY);
-    comm_monitorFloat("derivative", (float32_t*)&derivative, READONLY);
+    // comm_monitorFloat("error", (float32_t*)&error, READONLY);
+    // comm_monitorFloat("integral", (float32_t*)&integral, READONLY);
+    // comm_monitorFloat("derivative", (float32_t*)&derivative, READONLY);
+
+    comm_monitorUint32("Dry friction compensation", &dry_friction_comp, READWRITE);
+    comm_monitorUint32("Viscous friction compensation", &viscous_friction_comp, READWRITE);
+    comm_monitorUint32("Gravity compensation", &gravity_comp, READWRITE);
+    comm_monitorFloat("sinus theta", (float32_t*)&sin_angle, READONLY);
 }
 
 /**
- * @brief Updates the haptic controller state.
- */
+* @brief Updates the haptic controller state.
+*/
 void hapt_Update()
 {
+  hapt_motorTorque = 0.0f; // Reset the motor torque.
+
   float32_t motorShaftAngle; // [deg].
 
   // Compute the dt (uncomment if you need it).
@@ -210,8 +233,8 @@ void hapt_Update()
     counter = 0;
     if (hapt_encoderPaddleAngle >= -0.5 && hapt_encoderPaddleAngle <= 0.5)
     {
-    	hapt_motorTorque = friction_torque;
-    	friction_torque -= step;
+      hapt_motorTorque = friction_torque;
+      friction_torque -= step;
     }
     else
     {
@@ -230,10 +253,40 @@ void hapt_Update()
   {
     led_Set(0, 1.0);
   }else {
-	led_Set(0, 0.0);
+    led_Set(0, 0.0);
   }
 
+  // Dry friction compensation // todo filter speed todo tune dry comp and speed hysteresis
+  if (dry_friction_comp == 1) {
+    if (est_speed > 20.0f) {
+        dry_comp = -0.0008; // Apply negative torque for positive velocity
+    } else if (est_speed < 10.0f) {
+        dry_comp = 0.0008; // Apply positive torque for negative velocity
+    } else {
+        dry_comp = 0.0f; // No compensation when velocity is zero
+    }
+  } else{
+    dry_comp = 0.0f;
+  }
 
+  // Viscous friction compensation TODO filter velocity
+  float32_t angular_velocity_rad = est_speed * (M_PI / 180.0f); // Convert angular velocity to radians per second
+  if (viscous_friction_comp == 1){
+    visc_comp = -1.881e-5f * angular_velocity_rad;
+  }else{
+    visc_comp = 0.0f;
+  }
+
+  // Gravity compensation
+  if (gravity_comp == 1){
+    sin_angle = sin(hapt_encoderPaddleAngle * M_PI / 180.0f); // Convert angle to radians
+    grav_comp = center_of_mass_dist * paddle_mass * 9.81 * sin_angle / 15.0f; // * 0.01;
+  }else{
+    grav_comp = 0.0f;
+  }
+
+  // Apply the compensations to the motor torque
+  hapt_motorTorque += dry_comp + visc_comp + grav_comp; // Add viscous and gravity compensation to the motor torque
 
   // PID controller
   if (set_PID == 1)
@@ -254,19 +307,28 @@ void hapt_Update()
     // } else {
     hapt_motorTorque = k_p * error + k_i * integral + k_d * derivative;
 
-    if (hapt_motorTorque > 0.03)
+    if (hapt_motorTorque > 0.028)
     {
-      hapt_motorTorque = 0.03;
+      hapt_motorTorque = 0.028;
     }
-    else if (hapt_motorTorque < -0.03)
+    else if (hapt_motorTorque < -0.028)
     {
-      hapt_motorTorque = -0.03;
+      hapt_motorTorque = -0.028;
     }
 
     prev_error = error;
     prev_derivative = derivative;
   }
 
+  if (hapt_motorTorque > 0.03)
+  {
+    hapt_motorTorque = 0.03;
+  }
+  else if (hapt_motorTorque < -0.03)
+  {
+    hapt_motorTorque = -0.03;
+  }
+  
   torq_SetTorque(hapt_motorTorque);
   hapt_hallVoltage = hall_GetVoltage();
 
