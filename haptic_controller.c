@@ -22,6 +22,7 @@
 #include "drivers/callback_timers.h"
 #include "lib/utils.h"
 #include "torque_regulator.h"
+#include "drivers/led.h"
 
 #define DEFAULT_HAPTIC_CONTROLLER_PERIOD 350 // Default control loop period [us].
 #define TWO_DIV_INTEGRATION true
@@ -61,9 +62,15 @@ volatile float32_t ref_pos = 0.0f;
 volatile float32_t error = 0.0f;
 volatile float32_t integral = 0.0f;
 volatile float32_t derivative = 0.0f;
+volatile float32_t prev_derivative = 0.0f;
 volatile float32_t prev_error = 0.0f;
 
 volatile float32_t set_PID = 0.0f;
+volatile float32_t start_dry_test = 0.0f;
+
+float32_t friction_torque = 0.0f; // [N.m].
+float32_t step = 0.0001f; // [-].
+float32_t counter = 0.0f; // [-].
 
 void hapt_Update(void);
 
@@ -82,7 +89,8 @@ void hapt_Init(void)
     est_angle_from_hall = 0.0f;
     filtered_speed_hall = 0.0f;
     filtered_acc_hall = 0.0f;
-    cutoff_freq = 50.0f;
+    cutoff_freq = 100.0f;
+
 
     // initialize PID controller
     k_p = 0.02f;
@@ -116,6 +124,7 @@ void hapt_Init(void)
     comm_monitorFloat("k_i", (float32_t*)&k_i, WRITEONLY);
 
     comm_monitorFloat("set PID 0/1", (float32_t*)&set_PID, WRITEONLY);
+    comm_monitorFloat("start dry test 0/1", (float32_t*)&start_dry_test, WRITEONLY);
 
     comm_monitorFloat("error", (float32_t*)&error, READONLY);
     comm_monitorFloat("integral", (float32_t*)&integral, READONLY);
@@ -127,112 +136,153 @@ void hapt_Init(void)
  */
 void hapt_Update()
 {
-    float32_t motorShaftAngle; // [deg].
+  float32_t motorShaftAngle; // [deg].
 
-    // Compute the dt (uncomment if you need it).
-    float32_t dt = ((float32_t)cbt_GetHapticControllerPeriod()) / 1000000.0f; // [s].
+  // Compute the dt (uncomment if you need it).
+  float32_t dt = ((float32_t)cbt_GetHapticControllerPeriod()) / 1000000.0f; // [s].
 
-    // Increment the timestamp.
-    hapt_timestamp += cbt_GetHapticControllerPeriod();
-    
-    // Get the Hall sensor voltage.
-    hapt_hallVoltage = hall_GetVoltage();
+  // Increment the timestamp.
+  hapt_timestamp += cbt_GetHapticControllerPeriod();
 
-    // Get the encoder position.
-    motorShaftAngle = enc_GetPosition();
-    hapt_encoderPaddleAngle = motorShaftAngle / REDUCTION_RATIO;
+  // Get the Hall sensor voltage.
+  hapt_hallVoltage = hall_GetVoltage();
 
-    // Angle estimation from the Hall sensor
-    float32_t slope = 53.4149;
-    float32_t intercept = -133.5939;
+  // Get the encoder position.
+  motorShaftAngle = enc_GetPosition();
+  hapt_encoderPaddleAngle = motorShaftAngle / REDUCTION_RATIO;
 
-    est_angle_from_hall = slope * hapt_hallVoltage + intercept;
+  // Angle estimation from the Hall sensor
+  float32_t slope = 53.4149;
+  float32_t intercept = -133.5939;
 
-    // Compute the motor torque, and apply it.
-    //hapt_motorTorque = 0.0f;
-    if (stiffness != 0) {
-      hapt_motorTorque = - stiffness * (hapt_encoderPaddleAngle - rest_angle) * 0.01;
+  est_angle_from_hall = slope * hapt_hallVoltage + intercept;
+
+  // Compute the motor torque, and apply it.
+  // hapt_motorTorque = 0.0f;
+  if (stiffness != 0)
+  {
+    hapt_motorTorque = -stiffness * (hapt_encoderPaddleAngle - rest_angle) * 0.01;
+  }
+
+  // speed estimation from optical sensor and Hall sensor
+  if (TWO_DIV_INTEGRATION)
+  {
+    est_speed = (prev2_angle - hapt_encoderPaddleAngle) / (2 * dt);
+    est_speed_hall = (prev2_angle_hall - est_angle_from_hall) / (2 * dt);
+    // filtered_speed_hall = low_Pass_Filter(est_speed_hall, filtered_speed_hall, 2*dt, 10);
+  }
+  else
+  {
+    est_speed = (prev_angle - hapt_encoderPaddleAngle) / dt;
+    est_speed_hall = (prev_angle_hall - est_angle_from_hall) / dt;
+  }
+
+  filtered_speed_hall = low_Pass_Filter(est_speed_hall, filtered_speed_hall, dt, cutoff_freq);
+
+  // acceleration estimation from optical sensor and Hall sensor
+  if (TWO_DIV_INTEGRATION)
+  {
+    est_acc = (prev2_est_speed - est_speed) / (2 * dt);
+    est_acc_hall = (prev2_est_speed_hall - est_speed_hall) / (2 * dt);
+    // filtered_acc_hall = low_Pass_Filter(est_acc_hall, filtered_acc_hall, 2*dt, 10);
+  }
+  else
+  {
+    est_acc = (prev_est_speed - est_speed) / dt;
+    est_acc_hall = (prev_est_speed_hall - est_speed_hall) / dt;
+  }
+
+  filtered_acc_hall = low_Pass_Filter(est_acc_hall, filtered_acc_hall, dt, cutoff_freq);
+
+  if (damping != 0)
+  {
+    if (hapt_encoderPaddleAngle - rest_angle <= 10 && hapt_encoderPaddleAngle - rest_angle >= -10)
+    {
+      hapt_motorTorque = hapt_motorTorque + damping * est_speed * 0.01;
     }
+  }
 
-    //speed estimation from optical sensor and Hall sensor
-    if(TWO_DIV_INTEGRATION) {
-      est_speed = (prev2_angle - hapt_encoderPaddleAngle) / (2*dt);
-      est_speed_hall = (prev2_angle_hall - est_angle_from_hall) / (2*dt);
-      // filtered_speed_hall = low_Pass_Filter(est_speed_hall, filtered_speed_hall, 2*dt, 10);
-    } else {
-      est_speed = (prev_angle - hapt_encoderPaddleAngle) / dt;
-      est_speed_hall = (prev_angle_hall - est_angle_from_hall) / dt;
+  float32_t filtered_enc_pos = low_Pass_Filter(hapt_encoderPaddleAngle, prev_angle, dt, cutoff_freq);
+  float32_t filtered_hall_pos = low_Pass_Filter(est_angle_from_hall, prev_angle_hall, dt, cutoff_freq);
+
+  if (start_dry_test == 1 && counter >= 500)
+  {
+    counter = 0;
+    if (hapt_encoderPaddleAngle >= -0.5 && hapt_encoderPaddleAngle <= 0.5)
+    {
+    	hapt_motorTorque = friction_torque;
+    	friction_torque -= step;
     }
-
-    filtered_speed_hall = low_Pass_Filter(est_speed_hall, filtered_speed_hall, dt, cutoff_freq);
-
-    //acceleration estimation from optical sensor and Hall sensor
-    if(TWO_DIV_INTEGRATION) {
-      est_acc = (prev2_est_speed - est_speed) / (2*dt);
-      est_acc_hall = (prev2_est_speed_hall - est_speed_hall) / (2*dt);
-      // filtered_acc_hall = low_Pass_Filter(est_acc_hall, filtered_acc_hall, 2*dt, 10);
-    } else {
-      est_acc = (prev_est_speed - est_speed) / dt;
-      est_acc_hall = (prev_est_speed_hall - est_speed_hall) / dt;
-    }
-
-    filtered_acc_hall = low_Pass_Filter(est_acc_hall, filtered_acc_hall, dt, cutoff_freq);
-
-    if (damping != 0){
-      if (hapt_encoderPaddleAngle - rest_angle <= 10 && hapt_encoderPaddleAngle - rest_angle >= -10){
-        hapt_motorTorque = hapt_motorTorque + damping * est_speed * 0.01;
+    else
+    {
+      for (int i = 0; i < 1000; i++)
+      {
+        start_dry_test = 0;
+        friction_torque = 0;
       }
+      hapt_motorTorque = 0.0f;
     }
-    
-    float_t32_t filtered_enc_pos = low_Pass_Filter(hapt_encoderPaddleAngle, hapt_encoderPaddleAngle, dt, cutoff_freq);
-    float_t32_t filtered_hall_pos = low_Pass_Filter(est_angle_from_hall, est_angle_from_hall, dt, cutoff_freq);
+  } else if (start_dry_test == 1) {
+    counter += 1;
+  }
 
-    // PID controller
-    if(set_PID == 1){
-    	// hall encoder
-    	// error = ref_pos - est_angle_from_hall;
-      // error = ref_pos - filtered_hall_pos;
-    	// incremental encoder
-    	//error = ref_pos - hapt_encoderPaddleAngle;
-      error = ref_pos - filtered_enc_pos;
-    	integral = integral + error * dt;
-    	derivative = (error - prev_error) / dt;
+  if (hapt_encoderPaddleAngle >= -0.1 && hapt_encoderPaddleAngle <= 0.1)
+  {
+    led_Set(0, 1.0);
+  }else {
+	led_Set(0, 0.0);
+  }
 
-      
 
-      if (error >= -0.2 && error <= 0.2){
-        hapt_motorTorque = 0;
-      } else {
-        hapt_motorTorque = k_p * error + k_i * integral + k_d * derivative;
 
-        if (hapt_motorTorque > 0.02){
-          hapt_motorTorque = 0.02;
-        } else if (hapt_motorTorque < -0.02){
-          hapt_motorTorque = -0.02;
-          }
-      }
+  // PID controller
+  if (set_PID == 1)
+  {
+    // hall encoder
+    // error = ref_pos - est_angle_from_hall;
+    // error = ref_pos - filtered_hall_pos;
+    // incremental encoder
+    error = ref_pos - hapt_encoderPaddleAngle;
+    // error = ref_pos - filtered_enc_pos;
+    integral = integral + error * dt;
+    derivative = (error - prev_error) / dt;
 
-      prev_error = error;
+    // derivative = low_Pass_Filter(derivative, prev_derivative, dt, cutoff_freq);
+
+    // if (error >= -0.2 && error <= 0.2){
+    //   hapt_motorTorque = 0;
+    // } else {
+    hapt_motorTorque = k_p * error + k_i * integral + k_d * derivative;
+
+    if (hapt_motorTorque > 0.03)
+    {
+      hapt_motorTorque = 0.03;
     }
-    
+    else if (hapt_motorTorque < -0.03)
+    {
+      hapt_motorTorque = -0.03;
+    }
 
-    torq_SetTorque(hapt_motorTorque);
-    hapt_hallVoltage = hall_GetVoltage();
+    prev_error = error;
+    prev_derivative = derivative;
+  }
 
-    // previous positions from optical and hall sensor
-    prev2_angle = prev_angle;
-    prev_angle = hapt_encoderPaddleAngle;
+  torq_SetTorque(hapt_motorTorque);
+  hapt_hallVoltage = hall_GetVoltage();
 
-    prev2_angle_hall = prev_angle_hall;
-    prev_angle_hall = est_angle_from_hall;
+  // previous positions from optical and hall sensor
+  prev2_angle = prev_angle;
+  prev_angle = hapt_encoderPaddleAngle;
 
-    //previous speed from optical and hall sensor
-    prev2_est_speed = prev_est_speed;
-    prev_est_speed = est_speed;
+  prev2_angle_hall = prev_angle_hall;
+  prev_angle_hall = est_angle_from_hall;
 
-    prev2_est_speed_hall = prev_est_speed_hall;
-    prev_est_speed_hall = est_speed_hall;
+  // previous speed from optical and hall sensor
+  prev2_est_speed = prev_est_speed;
+  prev_est_speed = est_speed;
 
+  prev2_est_speed_hall = prev_est_speed_hall;
+  prev_est_speed_hall = est_speed_hall;
 }
 
 float32_t low_Pass_Filter(float32_t input, float32_t prev_output, float32_t T, float32_t cutoff_freq)
