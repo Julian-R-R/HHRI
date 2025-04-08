@@ -72,6 +72,12 @@ float32_t friction_torque = 0.0f; // [N.m].
 float32_t step = 0.0001f; // [-].
 float32_t counter = 0.0f; // [-].
 
+float32_t start_t = 0.0f; // [s].
+
+float32_t sign(float32_t x) {
+    return (x > 0) - (x < 0);
+}
+
 // Friction and gravity compensation variables
 volatile uint32_t dry_friction_comp = 0; // Toggle for dry friction (0: off, 1: on)
 volatile uint32_t viscous_friction_comp = 0; // Toggle for viscous friction (0: off, 1: on)
@@ -109,9 +115,9 @@ void hapt_Init(void)
     gravity_comp = 0;
 
     // initialize PID controller
-    k_p = 0.02f;
-    k_i = 0.05;
-    k_d = 0.0025f;
+    k_p = 0.008f;
+    k_i = 0.005;
+    k_d = 0.00015f;
 
     // Make the timers call the update function periodically.
     cbt_SetHapticControllerTimer(hapt_Update, DEFAULT_HAPTIC_CONTROLLER_PERIOD);
@@ -136,11 +142,12 @@ void hapt_Init(void)
     comm_monitorFloat("ref_pos [deg]", (float32_t*)&ref_pos, READWRITE);
 
     comm_monitorFloat("k_p", (float32_t*)&k_p, WRITEONLY);
-    comm_monitorFloat("k_d", (float32_t*)&k_d, WRITEONLY);
     comm_monitorFloat("k_i", (float32_t*)&k_i, WRITEONLY);
+    comm_monitorFloat("k_d", (float32_t*)&k_d, WRITEONLY);
 
     comm_monitorFloat("set PID 0/1", (float32_t*)&set_PID, WRITEONLY);
     comm_monitorFloat("start dry test 0/1", (float32_t*)&start_dry_test, WRITEONLY);
+    comm_monitorFloat("friction torque [N.m]", (float32_t*)&friction_torque, READONLY);
 
     // comm_monitorFloat("error", (float32_t*)&error, READONLY);
     // comm_monitorFloat("integral", (float32_t*)&integral, READONLY);
@@ -157,7 +164,7 @@ void hapt_Init(void)
 */
 void hapt_Update()
 {
-  hapt_motorTorque = 0.0f; // Reset the motor torque.
+  //hapt_motorTorque = 0.0f; // Reset the motor torque.
 
   float32_t motorShaftAngle; // [deg].
 
@@ -228,32 +235,25 @@ void hapt_Update()
   float32_t filtered_enc_pos = low_Pass_Filter(hapt_encoderPaddleAngle, prev_angle, dt, cutoff_freq);
   float32_t filtered_hall_pos = low_Pass_Filter(est_angle_from_hall, prev_angle_hall, dt, cutoff_freq);
 
-  if (start_dry_test == 1 && counter >= 500)
+  if (fabs(start_dry_test) == 1 && counter >= 500 && set_PID == 0.0f)
   {
     counter = 0;
-    if (hapt_encoderPaddleAngle >= -0.5 && hapt_encoderPaddleAngle <= 0.5)
+    if (fabs(hapt_encoderPaddleAngle) <= 0.5)
     {
       hapt_motorTorque = friction_torque;
-      friction_torque -= step;
+      friction_torque += step * sign(start_dry_test);
     }
     else
     {
       for (int i = 0; i < 1000; i++)
       {
-        start_dry_test = 0;
-        friction_torque = 0;
+        hapt_motorTorque = 0.0f;
       }
-      hapt_motorTorque = 0.0f;
+      friction_torque = 0;
+      set_PID = 1.0f;
     }
-  } else if (start_dry_test == 1) {
+  } else if (fabs(start_dry_test) == 1) {
     counter += 1;
-  }
-
-  if (hapt_encoderPaddleAngle >= -0.1 && hapt_encoderPaddleAngle <= 0.1)
-  {
-    led_Set(0, 1.0);
-  }else {
-    led_Set(0, 0.0);
   }
 
   // Dry friction compensation // todo filter speed todo tune dry comp and speed hysteresis
@@ -318,6 +318,12 @@ void hapt_Update()
 
     prev_error = error;
     prev_derivative = derivative;
+
+    if (hapt_encoderPaddleAngle >= -0.05 && hapt_encoderPaddleAngle <= 0.05)
+    {
+      hapt_motorTorque = 0.0f;
+      set_PID = 0.0f;
+    }
   }
 
   if (hapt_motorTorque > 0.03)
@@ -345,6 +351,14 @@ void hapt_Update()
 
   prev2_est_speed_hall = prev_est_speed_hall;
   prev_est_speed_hall = est_speed_hall;
+
+  if (hapt_encoderPaddleAngle >= -0.1 && hapt_encoderPaddleAngle <= 0.1)
+  {
+    led_Set(0, 1.0);
+  }else {
+    led_Set(0, 0.0);
+  }
+
 }
 
 float32_t low_Pass_Filter(float32_t input, float32_t prev_output, float32_t T, float32_t cutoff_freq)
