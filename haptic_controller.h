@@ -14,34 +14,37 @@
  * limitations under the License.
  */
 
-#ifndef __HAPTIC_CONTROLLER_H
-#define __HAPTIC_CONTROLLER_H
-
-#include "main.h"
-
-/** @defgroup HapticController Main / Haptic controller
-  * @brief Main haptic paddle controller.
-  *
-  * This module is the high-level controller of the board. Basically, its role
-  * is to process the sensors data and then compute a motor torque, in order to
-  * achieve a spicific haptic effect.
-  *
-  * The content of hapt_Update() is typically what the user of the board will
-  * modify, depending on the selected sensors and control algorithms.
-  *
-  * Call hapt_Init() to setup this module. Its interrupt function will be called
-  * automatically periodically.
-  *
-  * @addtogroup HapticController
-  * @{
-  */
-
-void hapt_Init(void);
-
-float32_t low_Pass_Filter(float32_t, float32_t, float32_t, float32_t);
-
-/**
-  * @}
-  */
-
-#endif
+ #ifndef __HAPTIC_CONTROLLER_H
+ #define __HAPTIC_CONTROLLER_H
+ 
+ #include "main.h"
+ 
+ /** @defgroup HapticController Main / Haptic controller
+   * @brief Main haptic paddle controller.
+   *
+   * This module is the high-level controller of the board. Basically, its role
+   * is to process the sensors data and then compute a motor torque, in order to
+   * achieve a spicific haptic effect.
+   *
+   * The content of hapt_Update() is typically what the user of the board will
+   * modify, depending on the selected sensors and control algorithms.
+   *
+   * Call hapt_Init() to setup this module. Its interrupt function will be called
+   * automatically periodically.
+   *
+   * @addtogroup HapticController
+   * @{
+   */
+ 
+ void hapt_Init(void);
+ 
+ float32_t low_Pass_Filter(float32_t, float32_t, float32_t, float32_t);
+ float32_t virtualWall(float32_t);
+ bool hapt_DetectOscillation(float32_t, uint32_t);
+ 
+ /**
+   * @}
+   */
+ 
+ #endif
+ 
