@@ -39,7 +39,7 @@
  void hapt_Init(void);
  
  float32_t low_Pass_Filter(float32_t, float32_t, float32_t, float32_t);
- float32_t virtualWall(float32_t);
+ float32_t virtualWall(float32_t, float32_t);
  bool hapt_DetectOscillation(float32_t, uint32_t);
  
  /**
