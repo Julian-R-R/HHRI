@@ -23,6 +23,7 @@
 #include "lib/utils.h"
 #include "torque_regulator.h"
 #include "drivers/led.h"
+#include "drivers/adc.h"
 
 // #define TEST_MODE_10000 // Uncomment to test with 350us control loop
 
@@ -126,6 +127,8 @@ float32_t start_wait_time = 0.0f; // [us].
 float32_t wait_time_test = 0.0f; // [us].
 bool PID_stabilized = false; // Flag to indicate if PID is stabilized
 
+volatile float32_t emg_value = 0.0f; // EMG value [V].
+
 void hapt_Update(void);
 
 /**
@@ -198,6 +201,7 @@ void hapt_Init(void)
     comm_monitorFloat("Wall damping [N.m/deg/s]", &wall_damping, READWRITE);
     comm_monitorUint32("zero_cross_count", &zero_cross_count, READONLY);
     comm_monitorFloat("Wall filter [Hz]", &wall_filter, READWRITE);
+    comm_monitorFloat("start wait time [us]", &start_wait_time, READONLY);
 }
 
 /**
@@ -433,19 +437,12 @@ void hapt_Update()
     }
   }
 
-  // if (hapt_motorTorque > 0.03)
-  // {
-  //   hapt_motorTorque = 0.03;
-  // }
-  // else if (hapt_motorTorque < -0.03)
-  // {
-  //   hapt_motorTorque = -0.03;
-  // }
-
   hapt_motorTorque += AUTOMATIC_MANUAL_TORQUE * (-1 * sign(virtual_wall_automatic));
   
   torq_SetTorque(hapt_motorTorque);
   hapt_hallVoltage = hall_GetVoltage();
+
+  emg_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
 
   // previous positions from optical and hall sensor
   prev2_angle = prev_angle;
@@ -461,29 +458,22 @@ void hapt_Update()
   prev2_est_speed_hall = prev_est_speed_hall;
   prev_est_speed_hall = est_speed_hall;
 
+  // ============ LED indicators ============
+
   if (hapt_encoderPaddleAngle >= -0.1 && hapt_encoderPaddleAngle <= 0.1)
-  {
     led_Set(0, 1.0);
-  }else {
+  else 
     led_Set(0, 0.0);
-  }
+
   if (hapt_encoderPaddleAngle <= -14.9)
-  {
     led_Set(1, 1.0);
-  }else {
+  else 
     led_Set(1, 0.0);
-  }
-  if (start_wait_time + 1000000 < hapt_timestamp)
-  {
-    led_Set(2, 1.0);
-  }else {
-    led_Set(2, 0.0);
-  }
-  if (crossing_detected) {
+
+  if (crossing_detected) 
       led_Set(3, 1.0); // Example: light up LED if detected
-  } else {
+  else
       led_Set(3, 0.0);
-  }
 }
 
 float32_t low_Pass_Filter(float32_t input, float32_t prev_output, float32_t T, float32_t cutoff_freq)
