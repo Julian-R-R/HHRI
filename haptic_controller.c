@@ -24,6 +24,8 @@
 #include "torque_regulator.h"
 #include "drivers/led.h"
 #include "drivers/adc.h"
+#include <stdio.h>
+
 
 // #define TEST_MODE_10000 // Uncomment to test with 350us control loop
 
@@ -127,7 +129,24 @@ float32_t start_wait_time = 0.0f; // [us].
 float32_t wait_time_test = 0.0f; // [us].
 bool PID_stabilized = false; // Flag to indicate if PID is stabilized
 
+volatile uint32_t set_EMG = 0; // Set EMG value [V].
+
 volatile float32_t emg_value = 0.0f; // EMG value [V].
+volatile float32_t emg_value_prev = 0.0f; // Previous EMG value [V].
+volatile float32_t emg_value_filt = 0.0f; // Filtered EMG value [V].
+
+volatile int start_time_emg = 0; // Time for EMG value [us].
+volatile uint32_t time_threshold = 50000; // Time for threshold [us].
+
+volatile float32_t emg_min = 100.0f; // Minimum EMG value [V].
+volatile float32_t emg_max = -100.0f; // Maximum EMG value [V].
+volatile float32_t emg_diff = 0.0f; // EMG threshold [V].
+volatile float32_t emg_offset = 0.0f; // EMG offset [V].
+
+volatile uint32_t emg_count = 0; // EMG count [V].
+volatile uint32_t emg_window = 5; // EMG average count [V].
+volatile float32_t emg_buff[5] = {0.0f}; // EMG average [V].
+volatile float32_t emg_mean = 0.0f; // EMG average [V].
 
 void hapt_Update(void);
 
@@ -201,7 +220,18 @@ void hapt_Init(void)
     comm_monitorFloat("Wall damping [N.m/deg/s]", &wall_damping, READWRITE);
     comm_monitorUint32("zero_cross_count", &zero_cross_count, READONLY);
     comm_monitorFloat("Wall filter [Hz]", &wall_filter, READWRITE);
-    comm_monitorFloat("start wait time [us]", &start_wait_time, READONLY);
+
+    comm_monitorUint32("set EMG", &set_EMG, READWRITE);
+    comm_monitorFloat("EMG value [V]", &emg_value, READONLY);
+    comm_monitorFloat("Filtered EMG value [V]", &emg_value_filt, READONLY);
+    comm_monitorUint32("EMG time threshold [us]", &time_threshold, READWRITE);
+    comm_monitorFloat("EMG diff [V]", &emg_diff, READONLY);
+    comm_monitorFloat("EMG min [V]", &emg_min, READONLY);
+    comm_monitorFloat("EMG max [V]", &emg_max, READONLY);
+    comm_monitorFloat("EMG offset [V]", &emg_offset, READWRITE);
+
+    comm_monitorUint32("EMG window", &emg_window, READWRITE);
+    comm_monitorFloat("EMG mean [V]", &emg_mean, READONLY);
 }
 
 /**
@@ -439,10 +469,58 @@ void hapt_Update()
 
   hapt_motorTorque += AUTOMATIC_MANUAL_TORQUE * (-1 * sign(virtual_wall_automatic));
   
-  torq_SetTorque(hapt_motorTorque);
   hapt_hallVoltage = hall_GetVoltage();
 
   emg_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
+  emg_value_filt = low_Pass_Filter(emg_value, emg_value_filt, dt, cutoff_freq); // Apply low-pass filter to EMG value.
+  emg_value_prev = emg_value_filt;
+
+  if (start_time_emg + time_threshold < hapt_timestamp) { // 1 second
+    emg_diff = emg_max - emg_min; // Compute EMG threshold
+    start_time_emg = hapt_timestamp; // Reset start time for the way
+    emg_min = 2.0f; // Reset minimum EMG value
+    emg_max = -2.0f; // Reset maximum EMG value
+  } else {
+    if (emg_value_filt < emg_min) {
+      emg_min = emg_value_filt; // Update minimum EMG value
+    }
+    if (emg_value_filt > emg_max) {
+      emg_max = emg_value_filt; // Update maximum EMG value
+    }
+  }
+
+  if (emg_count < emg_window) {
+    emg_buff[emg_count] = emg_diff; // Store EMG value in the buffer
+  } else {
+    emg_buff[emg_count % emg_window] = emg_diff; // Store EMG value in the buffer
+  }
+
+  emg_count++;
+
+  float32_t emg_sum = 0.0f;
+  for (uint32_t i = 0; i < ( emg_count < emg_window ? emg_count : emg_window); i++) {
+    emg_sum += emg_buff[i]; // Compute the sum of EMG values in the buffer
+  }
+  emg_mean = emg_sum / emg_window; // Compute the mean of EMG values in the buffer
+
+
+  // hapt_motorTorque = 0.0f; // Reset the motor torque.
+  if (set_EMG == 1) {
+    hapt_motorTorque += (emg_diff-emg_offset) * 0.01f; // Apply EMG value to the motor torque.
+  }
+  
+  
+  if (hapt_motorTorque > 0.028)
+  {
+    hapt_motorTorque = 0.028;
+  }
+  else if (hapt_motorTorque < -0.028)
+  {
+    hapt_motorTorque = -0.028;
+  }
+
+  torq_SetTorque(hapt_motorTorque);
+
 
   // previous positions from optical and hall sensor
   prev2_angle = prev_angle;
@@ -520,3 +598,4 @@ bool hapt_DetectOscillation(float32_t current_speed, uint32_t timestamp_us) {
 
   return detected_oscillation;
 }
+
