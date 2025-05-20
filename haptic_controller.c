@@ -129,14 +129,15 @@ float32_t start_wait_time = 0.0f; // [us].
 float32_t wait_time_test = 0.0f; // [us].
 bool PID_stabilized = false; // Flag to indicate if PID is stabilized
 
-volatile uint32_t set_EMG = 0; // Set EMG value [V].
+volatile uint32_t set_EMG_torque = 0; // Set EMG value [V].
+volatile uint32_t set_EMG_pos = 0; // Set EMG value [V].
 
 volatile float32_t emg_value = 0.0f; // EMG value [V].
 volatile float32_t emg_value_prev = 0.0f; // Previous EMG value [V].
 volatile float32_t emg_value_filt = 0.0f; // Filtered EMG value [V].
 
 volatile int start_time_emg = 0; // Time for EMG value [us].
-volatile uint32_t time_threshold = 50000; // Time for threshold [us].
+volatile uint32_t time_threshold = 1000; // Time for threshold [us].
 
 volatile float32_t emg_min = 100.0f; // Minimum EMG value [V].
 volatile float32_t emg_max = -100.0f; // Maximum EMG value [V].
@@ -144,8 +145,10 @@ volatile float32_t emg_diff = 0.0f; // EMG threshold [V].
 volatile float32_t emg_offset = 0.0f; // EMG offset [V].
 
 volatile uint32_t emg_count = 0; // EMG count [V].
-volatile uint32_t emg_window = 5; // EMG average count [V].
-volatile float32_t emg_buff[5] = {0.0f}; // EMG average [V].
+volatile uint32_t emg_count_2 = 0; // EMG count [V].
+volatile uint32_t emg_window = 100; // EMG average count [V].
+volatile float32_t emg_buff[250] = {0.0f}; // EMG average [V].
+volatile float32_t emg_buff_2[250] = {0.0f}; // EMG average [V].
 volatile float32_t emg_mean = 0.0f; // EMG average [V].
 
 void hapt_Update(void);
@@ -165,7 +168,7 @@ void hapt_Init(void)
     est_angle_from_hall = 0.0f;
     filtered_speed_hall = 0.0f;
     filtered_acc_hall = 0.0f;
-    cutoff_freq = 50.0f;
+    cutoff_freq = 15.0f;
 
     dry_friction_comp = 0;
     viscous_friction_comp = 0;
@@ -221,7 +224,8 @@ void hapt_Init(void)
     comm_monitorUint32("zero_cross_count", &zero_cross_count, READONLY);
     comm_monitorFloat("Wall filter [Hz]", &wall_filter, READWRITE);
 
-    comm_monitorUint32("set EMG", &set_EMG, READWRITE);
+    comm_monitorUint32("set EMG torque", &set_EMG_torque, READWRITE);
+    comm_monitorUint32("set EMG position", &set_EMG_pos, READWRITE);
     comm_monitorFloat("EMG value [V]", &emg_value, READONLY);
     comm_monitorFloat("Filtered EMG value [V]", &emg_value_filt, READONLY);
     comm_monitorUint32("EMG time threshold [us]", &time_threshold, READWRITE);
@@ -401,6 +405,76 @@ void hapt_Update()
     }
   }
 
+  hapt_motorTorque += AUTOMATIC_MANUAL_TORQUE * (-1 * sign(virtual_wall_automatic));
+  
+  hapt_hallVoltage = hall_GetVoltage();
+
+  emg_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
+  emg_value_filt = low_Pass_Filter(emg_value, emg_value_filt, dt, cutoff_freq); // Apply low-pass filter to EMG value.
+  emg_value_prev = emg_value_filt;
+
+  if (start_time_emg + time_threshold < hapt_timestamp) { // 1 second
+    emg_diff = emg_max - emg_min; // Compute EMG threshold
+    start_time_emg = hapt_timestamp; // Reset start time for the way
+    emg_min = 2.0f; // Reset minimum EMG value
+    emg_max = -2.0f; // Reset maximum EMG value
+  } else {
+    if (emg_value_filt < emg_min) {
+      emg_min = emg_value_filt; // Update minimum EMG value
+    }
+    if (emg_value_filt > emg_max) {
+      emg_max = emg_value_filt; // Update maximum EMG value
+    }
+  }
+
+  if (emg_count < emg_window) {
+    emg_buff[emg_count] = emg_diff; // Store EMG value in the buffer
+  } else {
+    emg_buff[emg_count % emg_window] = emg_diff; // Store EMG value in the buffer
+  }
+
+  emg_count++;
+
+  float32_t emg_sum = 0.0f;
+  for (uint32_t i = 0; i < ( emg_count < emg_window ? emg_count : emg_window); i++) {
+    emg_sum += emg_buff[i]; // Compute the sum of EMG values in the buffer
+  }
+  emg_mean = emg_sum / emg_window; // Compute the mean of EMG values in the buffer
+
+
+  if (emg_count_2 < emg_window) {
+    emg_buff_2[emg_count_2] = emg_mean; // Store EMG value in the buffer
+  } else {
+    emg_buff_2[emg_count_2 % emg_window] = emg_mean; // Store EMG value in the buffer
+  }
+
+  float32_t emg_sum_2 = 0.0f;
+  for (uint32_t i = 0; i < ( emg_count_2 < emg_window ? emg_count_2 : emg_window); i++) {
+    emg_sum_2 += emg_buff_2[i]; // Compute the sum of EMG values in the buffer
+  }
+  emg_mean = emg_sum_2 / emg_window; // Compute the mean of EMG values in the buffer
+
+  emg_count_2++;
+
+  float32_t emg_torque = 0.0f; // Compute the EMG difference
+  // hapt_motorTorque = 0.0f; // Reset the motor torque.
+  if (set_EMG_torque == 1) {
+    emg_torque = (emg_diff-emg_offset) * 0.01f; // Apply EMG value to the motor torque.
+  } else if (set_EMG_pos == 1) {
+    ref_pos = (emg_mean-emg_offset) * 3000.0f; // Apply EMG value to the reference position.
+    if (ref_pos > 15.0f) {
+      ref_pos = 15.0f; // Limit the reference position to 15 degrees
+    } else if (ref_pos < -15.0f) {
+      ref_pos = -15.0f; // Limit the reference position to -15 degrees
+    }
+    set_PID = 1.0f; // Set PID controller
+  } else {
+    emg_torque = 0.0f; // Reset EMG torque
+    set_PID = 0.0f; // Reset PID controller
+  }
+
+  hapt_motorTorque += emg_torque;
+
   // ====================== PID controller ====================
   if (set_PID)
   {
@@ -465,48 +539,6 @@ void hapt_Update()
         }
       }
     }
-  }
-
-  hapt_motorTorque += AUTOMATIC_MANUAL_TORQUE * (-1 * sign(virtual_wall_automatic));
-  
-  hapt_hallVoltage = hall_GetVoltage();
-
-  emg_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
-  emg_value_filt = low_Pass_Filter(emg_value, emg_value_filt, dt, cutoff_freq); // Apply low-pass filter to EMG value.
-  emg_value_prev = emg_value_filt;
-
-  if (start_time_emg + time_threshold < hapt_timestamp) { // 1 second
-    emg_diff = emg_max - emg_min; // Compute EMG threshold
-    start_time_emg = hapt_timestamp; // Reset start time for the way
-    emg_min = 2.0f; // Reset minimum EMG value
-    emg_max = -2.0f; // Reset maximum EMG value
-  } else {
-    if (emg_value_filt < emg_min) {
-      emg_min = emg_value_filt; // Update minimum EMG value
-    }
-    if (emg_value_filt > emg_max) {
-      emg_max = emg_value_filt; // Update maximum EMG value
-    }
-  }
-
-  if (emg_count < emg_window) {
-    emg_buff[emg_count] = emg_diff; // Store EMG value in the buffer
-  } else {
-    emg_buff[emg_count % emg_window] = emg_diff; // Store EMG value in the buffer
-  }
-
-  emg_count++;
-
-  float32_t emg_sum = 0.0f;
-  for (uint32_t i = 0; i < ( emg_count < emg_window ? emg_count : emg_window); i++) {
-    emg_sum += emg_buff[i]; // Compute the sum of EMG values in the buffer
-  }
-  emg_mean = emg_sum / emg_window; // Compute the mean of EMG values in the buffer
-
-
-  // hapt_motorTorque = 0.0f; // Reset the motor torque.
-  if (set_EMG == 1) {
-    hapt_motorTorque += (emg_diff-emg_offset) * 0.01f; // Apply EMG value to the motor torque.
   }
   
   
