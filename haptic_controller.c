@@ -142,7 +142,7 @@ volatile uint32_t time_threshold = 1000; // Time for threshold [us].
 volatile float32_t emg_min = 100.0f; // Minimum EMG value [V].
 volatile float32_t emg_max = -100.0f; // Maximum EMG value [V].
 volatile float32_t emg_diff = 0.0f; // EMG threshold [V].
-volatile float32_t emg_offset = 0.0f; // EMG offset [V].
+volatile float32_t emg_offset = 0.002f; // EMG offset [V].
 
 volatile uint32_t emg_count = 0; // EMG count [V].
 volatile uint32_t emg_count_2 = 0; // EMG count [V].
@@ -150,6 +150,15 @@ volatile uint32_t emg_window = 100; // EMG average count [V].
 volatile float32_t emg_buff[250] = {0.0f}; // EMG average [V].
 volatile float32_t emg_buff_2[250] = {0.0f}; // EMG average [V].
 volatile float32_t emg_mean = 0.0f; // EMG average [V].
+
+volatile uint32_t emg_precise = 0;
+volatile float32_t emg_hold_value = 0.0f; // EMG hold value [V].
+volatile float32_t emg_hold_thres = 0.001f; // EMG hold position [deg].
+volatile uint32_t emg_hold_time_window = 250000;
+volatile uint32_t emg_hold_count = 0; // EMG hold count [V].
+volatile uint32_t emg_hold_start_time = 0;
+volatile uint32_t emg_hold_active = 0; // EMG hold active [V].
+volatile float32_t emg_hold_sum = 0.0f; // EMG torque [N.m].
 
 void hapt_Update(void);
 
@@ -236,6 +245,11 @@ void hapt_Init(void)
 
     comm_monitorUint32("EMG window", &emg_window, READWRITE);
     comm_monitorFloat("EMG mean [V]", &emg_mean, READONLY);
+
+    comm_monitorUint32("EMG precise", &emg_precise, READWRITE);
+    comm_monitorUint32("EMG hold active", &emg_hold_active, READWRITE);
+    comm_monitorFloat("EMG hold value [V]", &emg_hold_value, READWRITE);
+    comm_monitorFloat("EMG hold thres [V]", &emg_hold_thres, READWRITE);
 }
 
 /**
@@ -456,22 +470,54 @@ void hapt_Update()
 
   emg_count_2++;
 
+if (emg_precise == 1) {
+    if (emg_mean >= emg_hold_thres && !emg_hold_active) { // Check if EMG value is above the threshold and hold is not active
+      emg_hold_start_time = hapt_timestamp; // Reset start time for the hold position
+      emg_hold_active = 1; // Set the flag to indicate that EMG hold is active
+      emg_hold_count = 0; // Reset the hold count 
+    }
+    if (hapt_timestamp - emg_hold_start_time <= emg_hold_time_window && emg_hold_active) { // Check if the hold time is reached
+      emg_hold_sum += emg_mean; // Add the EMG mean value to the hold sum
+      emg_hold_count++; // Increment the hold count
+    } else {
+      if (emg_hold_active) { // If EMG hold was active
+        emg_hold_value = emg_hold_sum / emg_hold_count; // Compute the average EMG value during the hold
+      }
+    }
+    if (emg_mean < emg_hold_thres && emg_hold_active) { // Check if EMG value is below the threshold and hold is active
+      emg_hold_active = 0; // Reset the flag to indicate that EMG hold is not active
+      emg_hold_sum = 0.0f; // Reset the hold sum
+      emg_hold_count = 0; // Reset the hold count
+      emg_hold_value = 0.0f; // Reset the hold value
+    }
+  }
+
+
   float32_t emg_torque = 0.0f; // Compute the EMG difference
   // hapt_motorTorque = 0.0f; // Reset the motor torque.
   if (set_EMG_torque == 1) {
-    emg_torque = (emg_diff-emg_offset) * 0.01f; // Apply EMG value to the motor torque.
+    emg_torque = (emg_mean-emg_offset) * 1.0f; // Apply EMG value to the motor torque.
   } else if (set_EMG_pos == 1) {
-    ref_pos = (emg_mean-emg_offset) * 3000.0f; // Apply EMG value to the reference position.
-    if (ref_pos > 15.0f) {
-      ref_pos = 15.0f; // Limit the reference position to 15 degrees
-    } else if (ref_pos < -15.0f) {
-      ref_pos = -15.0f; // Limit the reference position to -15 degrees
+    ref_pos = (emg_mean) * 8000.0f; // Apply EMG value to the reference position.
+    if (ref_pos > 35.0f) {
+      ref_pos = 35.0f; // Limit the reference position to 15 degrees
+    } else if (ref_pos < -35.0f) {
+      ref_pos = -35.0f; // Limit the reference position to -15 degrees
     }
     set_PID = 1.0f; // Set PID controller
+  } else if (emg_precise == 1) {
+	  ref_pos = (emg_hold_value) * 10000.0f; // Apply EMG value to the reference position.
+    if (ref_pos > 35.0f) {
+      ref_pos = 35.0f; // Limit the reference position to 15 degrees
+    } else if (ref_pos < -35.0f) {
+      ref_pos = -35.0f; // Limit the reference position to -15 degrees
+    }
+	  set_PID = 1.0f; // Reset PID controller
   } else {
     emg_torque = 0.0f; // Reset EMG torque
     set_PID = 0.0f; // Reset PID controller
   }
+
 
   hapt_motorTorque += emg_torque;
 
