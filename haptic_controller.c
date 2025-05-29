@@ -153,7 +153,8 @@ volatile float32_t emg_mean = 0.0f; // EMG average [V].
 
 volatile uint32_t emg_precise = 0;
 volatile float32_t emg_hold_value = 0.0f; // EMG hold value [V].
-volatile float32_t emg_hold_thres = 0.001f; // EMG hold position [deg].
+volatile float32_t emg_hold_thres_rise = 0.00105f; // EMG hold position [deg].
+volatile float32_t emg_hold_thres_fall = 0.0005f; // EMG hold position [deg].
 volatile uint32_t emg_hold_time_window = 250000;
 volatile uint32_t emg_hold_count = 0; // EMG hold count [V].
 volatile uint32_t emg_hold_start_time = 0;
@@ -249,7 +250,8 @@ void hapt_Init(void)
     comm_monitorUint32("EMG precise", &emg_precise, READWRITE);
     comm_monitorUint32("EMG hold active", &emg_hold_active, READWRITE);
     comm_monitorFloat("EMG hold value [V]", &emg_hold_value, READWRITE);
-    comm_monitorFloat("EMG hold thres [V]", &emg_hold_thres, READWRITE);
+    comm_monitorFloat("EMG thres rise [V]", &emg_hold_thres_rise, READWRITE);
+    comm_monitorFloat("EMG thres fall [V]", &emg_hold_thres_fall, READWRITE);
 }
 
 /**
@@ -423,6 +425,8 @@ void hapt_Update()
   
   hapt_hallVoltage = hall_GetVoltage();
 
+  // ================= EMG processing =================
+
   emg_value = adc_GetChannelVoltage(ADC_CHANNEL_6);
   emg_value_filt = low_Pass_Filter(emg_value, emg_value_filt, dt, cutoff_freq); // Apply low-pass filter to EMG value.
   emg_value_prev = emg_value_filt;
@@ -470,8 +474,10 @@ void hapt_Update()
 
   emg_count_2++;
 
+  // ================= EMG precision position =================
+
 if (emg_precise == 1) {
-    if (emg_mean >= emg_hold_thres && !emg_hold_active) { // Check if EMG value is above the threshold and hold is not active
+    if (emg_mean >= emg_hold_thres_rise && !emg_hold_active) { // Check if EMG value is above the threshold and hold is not active
       emg_hold_start_time = hapt_timestamp; // Reset start time for the hold position
       emg_hold_active = 1; // Set the flag to indicate that EMG hold is active
       emg_hold_count = 0; // Reset the hold count 
@@ -484,7 +490,7 @@ if (emg_precise == 1) {
         emg_hold_value = emg_hold_sum / emg_hold_count; // Compute the average EMG value during the hold
       }
     }
-    if (emg_mean < emg_hold_thres && emg_hold_active) { // Check if EMG value is below the threshold and hold is active
+    if (emg_mean <= emg_hold_thres_fall && emg_hold_active) { // Check if EMG value is below the threshold and hold is active
       emg_hold_active = 0; // Reset the flag to indicate that EMG hold is not active
       emg_hold_sum = 0.0f; // Reset the hold sum
       emg_hold_count = 0; // Reset the hold count
@@ -496,9 +502,9 @@ if (emg_precise == 1) {
   float32_t emg_torque = 0.0f; // Compute the EMG difference
   // hapt_motorTorque = 0.0f; // Reset the motor torque.
   if (set_EMG_torque == 1) {
-    emg_torque = (emg_mean-emg_offset) * 1.0f; // Apply EMG value to the motor torque.
+    emg_torque = (emg_mean-emg_offset) * 2.0f; // Apply EMG value to the motor torque.
   } else if (set_EMG_pos == 1) {
-    ref_pos = (emg_mean) * 8000.0f; // Apply EMG value to the reference position.
+    ref_pos = (emg_mean) * 15000.0f; // 80000 / 13000
     if (ref_pos > 35.0f) {
       ref_pos = 35.0f; // Limit the reference position to 15 degrees
     } else if (ref_pos < -35.0f) {
@@ -506,7 +512,7 @@ if (emg_precise == 1) {
     }
     set_PID = 1.0f; // Set PID controller
   } else if (emg_precise == 1) {
-	  ref_pos = (emg_hold_value) * 10000.0f; // Apply EMG value to the reference position.
+	  ref_pos = (emg_hold_value) * 18000.0f; // 10000 / 18000
     if (ref_pos > 35.0f) {
       ref_pos = 35.0f; // Limit the reference position to 15 degrees
     } else if (ref_pos < -35.0f) {
