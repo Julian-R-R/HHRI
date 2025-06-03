@@ -431,7 +431,7 @@ void hapt_Update()
   emg_value_filt = low_Pass_Filter(emg_value, emg_value_filt, dt, cutoff_freq); // Apply low-pass filter to EMG value.
   emg_value_prev = emg_value_filt;
 
-  if (start_time_emg + time_threshold < hapt_timestamp) { // 1 second
+  if (start_time_emg + time_threshold < hapt_timestamp) { // 1 ms
     emg_diff = emg_max - emg_min; // Compute EMG threshold
     start_time_emg = hapt_timestamp; // Reset start time for the way
     emg_min = 2.0f; // Reset minimum EMG value
