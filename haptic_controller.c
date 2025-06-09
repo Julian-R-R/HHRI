@@ -26,9 +26,8 @@
 #include "drivers/adc.h"
 #include <stdio.h>
 
-
-// #define TEST_MODE_10000 // Uncomment to test with 350us control loop
-
+// ========================== DEFINES & CONSTANTS ==========================
+/* Control loop period and test mode */
 #ifdef TEST_MODE_10000
 volatile uint32_t DEFAULT_HAPTIC_CONTROLLER_PERIOD = 10000; // Default control loop period [us].
 #else
@@ -37,6 +36,7 @@ volatile uint32_t DEFAULT_HAPTIC_CONTROLLER_PERIOD = 350; // Default control loo
 
 #define TWO_DIV_INTEGRATION true
 
+/* Oscillation detection parameters */
 #define OSC_CENTER 15.0f
 #define OSC_MARGIN 0.2f
 #define OSC_THRESHOLD_MIN (OSC_CENTER - OSC_MARGIN)  // 14.5
@@ -46,16 +46,20 @@ volatile uint32_t DEFAULT_HAPTIC_CONTROLLER_PERIOD = 350; // Default control loo
 
 volatile float32_t small_threshold = 10.0f; // Threshold for speed detection [deg/s].
 
+/* Test and torque parameters */
 #define TEST_TIME_INTERVAL 500000 // 0.5 second in microseconds
 #define AUTOMATIC_MANUAL_TORQUE 0.005f // [N.m].
 
+// ========================== GLOBAL VARIABLES =============================
+
+/* Oscillation detection state */
 volatile uint32_t zero_cross_count = 0;
 volatile uint32_t osc_start_time = 0;
 volatile bool last_below_threshold = false;
 volatile bool detected_oscillation = false;
 volatile float32_t prev_speed = 0.0f;
 
-
+/* Haptic controller state */
 volatile uint32_t  hapt_timestamp; // Time base of the controller, also used to timestamp the samples sent by streaming [us].
 volatile float32_t hapt_hallVoltage; // Hall sensor output voltage [V].
 volatile float32_t hapt_encoderPaddleAngle; // Paddle angle measured by the incremental encoder [deg].
@@ -71,6 +75,7 @@ volatile float32_t est_angle_from_hall; //[deg]
 volatile float32_t filtered_speed_hall; //filtered hall speed [deg/s]
 volatile float32_t filtered_acc_hall; //filtered hall acceleration [deg/s^2]
 
+/* Previous values for estimation */
 volatile float32_t prev_angle = 0.0f;
 volatile float32_t prev_angle_hall = 0.0f;
 volatile float32_t prev2_angle = 0.0f;
@@ -83,6 +88,7 @@ volatile float32_t prev2_est_speed_hall = 0.0f;
 
 volatile float32_t cutoff_freq; //cutoff frequency for the low pass filter
 
+/* PID controller variables */
 volatile float32_t k_p = 0.0f;
 volatile float32_t k_d = 0.0f;
 volatile float32_t k_i = 0.0f;
@@ -97,17 +103,21 @@ volatile float32_t prev_error = 0.0f;
 volatile float32_t set_PID = 0.0f;
 volatile float32_t start_dry_test = 0.0f;
 
+/* Friction and test variables */
 float32_t friction_torque = 0.0f; // [N.m].
 float32_t step = 0.0001f; // [-].
 float32_t counter = 0.0f; // [-].
 
 float32_t start_t = 0.0f; // [s].
 
+/* Utility function */
 float32_t sign(float32_t x) {
     return (x > 0) - (x < 0);
 }
 
-// Friction and gravity compensation variables
+// ========================== COMPENSATION VARIABLES =======================
+
+/* Friction and gravity compensation variables */
 volatile uint32_t dry_friction_comp = 0; // Toggle for dry friction (0: off, 1: on)
 volatile uint32_t viscous_friction_comp = 0; // Toggle for viscous friction (0: off, 1: on)
 volatile uint32_t gravity_comp = 0; // Toggle for gravity compensation (0: off, 1: on)
@@ -119,6 +129,8 @@ volatile float32_t visc_comp = 0.0f; // [N.m].
 volatile float32_t grav_comp = 0.0f; // [N.m].
 volatile float32_t sin_angle = 0.0f; // [-].
 
+// ========================== VIRTUAL WALL VARIABLES =======================
+
 volatile float32_t virtual_wall = 0.0f;    
 volatile float32_t virtual_wall_automatic = 0.0f;    
 volatile float32_t wall_stiffness = 0.001f; // Stiffness of the virtual wall [N.m/deg].
@@ -128,6 +140,8 @@ volatile float32_t wall_filter = 0.0f; // Filter for the virtual wall [Hz].
 float32_t start_wait_time = 0.0f; // [us].
 float32_t wait_time_test = 0.0f; // [us].
 bool PID_stabilized = false; // Flag to indicate if PID is stabilized
+
+// ========================== EMG VARIABLES ================================
 
 volatile uint32_t set_EMG_torque = 0; // Set EMG value [V].
 volatile uint32_t set_EMG_pos = 0; // Set EMG value [V].
@@ -161,7 +175,11 @@ volatile uint32_t emg_hold_start_time = 0;
 volatile uint32_t emg_hold_active = 0; // EMG hold active [V].
 volatile float32_t emg_hold_sum = 0.0f; // EMG torque [N.m].
 
+// ========================== FUNCTION DECLARATIONS ========================
+
 void hapt_Update(void);
+
+// ========================== INITIALIZATION ===============================
 
 /**
 * @brief Initializes the haptic controller.
@@ -504,7 +522,7 @@ if (emg_precise == 1) {
   if (set_EMG_torque == 1) {
     emg_torque = (emg_mean-emg_offset) * 2.0f; // Apply EMG value to the motor torque.
   } else if (set_EMG_pos == 1) {
-    ref_pos = (emg_mean) * 15000.0f; // 80000 / 13000
+    ref_pos = (emg_mean) * 8000.0f; // 8000: biceps / 15000: forearm
     if (ref_pos > 35.0f) {
       ref_pos = 35.0f; // Limit the reference position to 15 degrees
     } else if (ref_pos < -35.0f) {
@@ -512,7 +530,7 @@ if (emg_precise == 1) {
     }
     set_PID = 1.0f; // Set PID controller
   } else if (emg_precise == 1) {
-	  ref_pos = (emg_hold_value) * 18000.0f; // 10000 / 18000
+	  ref_pos = (emg_hold_value) * 10000.0f; // 12000: biceps / 18000: forarm
     if (ref_pos > 35.0f) {
       ref_pos = 35.0f; // Limit the reference position to 15 degrees
     } else if (ref_pos < -35.0f) {
@@ -638,12 +656,23 @@ if (emg_precise == 1) {
       led_Set(3, 0.0);
 }
 
+// ========================== FILTERS ======================================
+
+/**
+ * @brief Simple first-order low-pass filter.
+ * @param input New input value.
+ * @param prev_output Previous output value.
+ * @param T Sample time [s].
+ * @param cutoff_freq Cutoff frequency [Hz].
+ * @return Filtered value.
+ */
 float32_t low_Pass_Filter(float32_t input, float32_t prev_output, float32_t T, float32_t cutoff_freq)
 {
   float32_t alpha = T / (T + 1 / (2 * M_PI * cutoff_freq));
   return alpha * input + (1 - alpha) * prev_output;
 }
 
+// ========================== VIRTUAL WALL ================================
 
 /**
  * @brief Applies a virtual wall at positions 15 and -15 degrees.
@@ -667,6 +696,14 @@ float32_t virtualWall(float32_t paddle_angle, float32_t dt)
     return wall_torque;
 }
 
+// ========================== OSCILLATION DETECTION ========================
+
+/**
+ * @brief Detects oscillations based on zero-crossings of speed.
+ * @param current_speed Current speed [deg/s].
+ * @param timestamp_us Current timestamp [us].
+ * @return True if oscillation detected, false otherwise.
+ */
 bool hapt_DetectOscillation(float32_t current_speed, uint32_t timestamp_us) {
   bool zero_crossed = sign(prev_speed) != sign(current_speed);  // Sign change
   if (zero_crossed && fabs(current_speed-prev_speed) > small_threshold) {
